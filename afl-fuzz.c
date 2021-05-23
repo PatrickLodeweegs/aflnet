@@ -66,6 +66,8 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <sys/file.h>
+#include <curl/curl.h>                          
+
 
 #include "aflnet.h"
 #include <graphviz/gvc.h>
@@ -413,10 +415,10 @@ region_t* (*extract_requests)(unsigned char* buf, unsigned int buf_size, unsigne
 /* Initialize the implemented state machine as a graphviz graph */
 void setup_ipsm()
 {
-  ipsm = agopen("g", Agdirected, 0);
+  ipsm = agopen((char*)"g", Agdirected, 0);
 
-  agattr(ipsm, AGNODE, "color", "black"); //Default node colr is black
-  agattr(ipsm, AGEDGE, "color", "black"); //Default edge color is black
+  agattr(ipsm, AGNODE,(char*) "color", (char*)"black"); //Default node colr is black
+  agattr(ipsm, AGEDGE, (char*) "color", (char*) "black"); //Default edge color is black
 
   khs_ipsm_paths = kh_init(hs32);
 
@@ -437,6 +439,28 @@ void destroy_ipsm()
   ck_free(state_ids);
 }
 
+/* Add a new state to the hash table */
+void add_new_state(khint_t *k, const u32 *id){
+  printf("Added a new state");
+  int discard;
+  state_info_t *newState_To = (state_info_t *) ck_alloc (sizeof(state_info_t));
+  newState_To->id = *id;
+  newState_To->is_covered = 1;
+  newState_To->paths = 0;
+  newState_To->paths_discovered = 0;
+  newState_To->selected_times = 0;
+  newState_To->fuzzs = 0;
+  newState_To->score = 1;
+  newState_To->selected_seed_index = 0;
+  newState_To->seeds = NULL;
+  newState_To->seeds_count = 0;
+
+  *k = kh_put(hms, khms_states, *id, &discard);
+  kh_value(khms_states, *k) = newState_To;
+  /* state_info_t *newState_From = (state_info_t *) ck_alloc (sizeof(state_info_t)); */
+
+}
+
 /* Get state index in the state IDs list, given a state ID */
 u32 get_state_index(u32 state_id) {
   u32 index = 0;
@@ -448,7 +472,7 @@ u32 get_state_index(u32 state_id) {
 
 /* Expand the size of the map when a new seed or a new state has been discovered */
 void expand_was_fuzzed_map(u32 new_states, u32 new_qentries) {
-  int i, j;
+  u32 i, j;
   //Realloc the memory
   was_fuzzed_map = (char **)ck_realloc(was_fuzzed_map, (fuzzed_map_states + new_states) * sizeof(char *));
   for (i = 0; i < fuzzed_map_states + new_states; i++)
@@ -575,7 +599,7 @@ void update_fuzzs() {
 
   for(i = 0; i < state_count; i++) {
     unsigned int state_id = state_sequence[i];
-
+    /* printf("%u", state_id); */
     if (kh_get(hs32, khs_state_ids, state_id) != kh_end(khs_state_ids)) {
       continue;
     } else {
@@ -753,6 +777,7 @@ struct queue_entry *choose_seed(u32 target_state_id, u8 mode)
   }
 
   return result;
+
 }
 
 /* Update state-aware variables */
@@ -799,20 +824,8 @@ void update_state_aware_variables(struct queue_entry *q, u8 dry_run)
           else agset(from,"color","red");
 
           //Insert this newly discovered state into the states hashtable
-          state_info_t *newState_From = (state_info_t *) ck_alloc (sizeof(state_info_t));
-          newState_From->id = prevStateID;
-          newState_From->is_covered = 1;
-          newState_From->paths = 0;
-          newState_From->paths_discovered = 0;
-          newState_From->selected_times = 0;
-          newState_From->fuzzs = 0;
-          newState_From->score = 1;
-          newState_From->selected_seed_index = 0;
-          newState_From->seeds = NULL;
-          newState_From->seeds_count = 0;
+          add_new_state(&k,&prevStateID);
 
-          k = kh_put(hms, khms_states, prevStateID, &discard);
-          kh_value(khms_states, k) = newState_From;
 
           //Insert this into the state_ids array too
           state_ids = (u32 *) ck_realloc(state_ids, (state_ids_count + 1) * sizeof(u32));
@@ -829,20 +842,8 @@ void update_state_aware_variables(struct queue_entry *q, u8 dry_run)
           else agset(to,"color","red");
 
           //Insert this newly discovered state into the states hashtable
-          state_info_t *newState_To = (state_info_t *) ck_alloc (sizeof(state_info_t));
-          newState_To->id = curStateID;
-          newState_To->is_covered = 1;
-          newState_To->paths = 0;
-          newState_To->paths_discovered = 0;
-          newState_To->selected_times = 0;
-          newState_To->fuzzs = 0;
-          newState_To->score = 1;
-          newState_To->selected_seed_index = 0;
-          newState_To->seeds = NULL;
-          newState_To->seeds_count = 0;
+          add_new_state(&k, &curStateID);
 
-          k = kh_put(hms, khms_states, curStateID, &discard);
-          kh_value(khms_states, k) = newState_To;
 
           //Insert this into the state_ids array too
           state_ids = (u32 *) ck_realloc(state_ids, (state_ids_count + 1) * sizeof(u32));
@@ -2180,7 +2181,8 @@ static void cull_queue(void) {
 
       //if (!top_rated[i]->was_fuzzed) pending_favored++;
       /* AFLNet takes into account more information to make this decision */
-      if ((top_rated[i]->generating_state_id == target_state_id || top_rated[i]->is_initial_seed) && (was_fuzzed_map[get_state_index(target_state_id)][top_rated[i]->index] == 0)) pending_favored++;
+      if ((top_rated[i]->generating_state_id == target_state_id || top_rated[i]->is_initial_seed) && (was_fuzzed_map[get_state_index(target_state_id)][top_rated[i]->index] == 0))
+        pending_favored++;
 
     }
 
@@ -3139,80 +3141,66 @@ static u8 run_target(char** argv, u32 timeout) {
   memset(trace_bits, 0, MAP_SIZE);
   MEM_BARRIER();
 
+ 
   /* If we're running in "dumb" mode, we can't rely on the fork server
      logic compiled into the target program, so we will just keep calling
      execve(). There is a bit of code duplication between here and
      init_forkserver(), but c'est la vie. */
-
-  if (dumb_mode == 1 || no_forkserver) {
-
+   if (dumb_mode == 1 || no_forkserver) {
     child_pid = fork();
-
     if (child_pid < 0) PFATAL("fork() failed");
-
     if (!child_pid) {
-
       struct rlimit r;
-
       if (mem_limit) {
-
         r.rlim_max = r.rlim_cur = ((rlim_t)mem_limit) << 20;
-
 #ifdef RLIMIT_AS
-
         setrlimit(RLIMIT_AS, &r); /* Ignore errors */
-
 #else
-
         setrlimit(RLIMIT_DATA, &r); /* Ignore errors */
-
 #endif /* ^RLIMIT_AS */
-
       }
-
       r.rlim_max = r.rlim_cur = 0;
-
       setrlimit(RLIMIT_CORE, &r); /* Ignore errors */
-
       /* Isolate the process and configure standard descriptors. If out_file is
          specified, stdin is /dev/null; otherwise, out_fd is cloned instead. */
-
       setsid();
-
       dup2(dev_null_fd, 1);
       dup2(dev_null_fd, 2);
-
       if (out_file) {
-
         dup2(dev_null_fd, 0);
-
       } else {
-
         dup2(out_fd, 0);
         close(out_fd);
-
       }
-
       /* On Linux, would be faster to use O_CLOEXEC. Maybe TODO. */
-
       close(dev_null_fd);
       close(out_dir_fd);
       close(dev_urandom_fd);
       close(fileno(plot_file));
-
       /* Set sane defaults for ASAN if nothing else specified. */
-
       setenv("ASAN_OPTIONS", "abort_on_error=1:"
                              "detect_leaks=0:"
                              "symbolize=0:"
                              "allocator_may_return_null=1", 0);
-
       setenv("MSAN_OPTIONS", "exit_code=" STRINGIFY(MSAN_ERROR) ":"
                              "symbolize=0:"
                              "msan_track_origins=0", 0);
-
-      execv(target_path, argv);
-
+      /* execv(target_path, argv); */
+      CURL *curl;
+      CURLcode res;
+      curl_global_init(CURL_GLOBAL_ALL);
+      curl = curl_easy_init();
+      if(curl){
+        curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:8080/v/1.40.0/libpod/containers/sut/restore");
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "import=0&keep=1");
+        res = curl_easy_perform(curl)
+        if(res != CURLE_OK){
+          fprintf(stderr, "curl easy_perform() failes: %s\n", curl_easy_strerror(res));
+        }
+        curl_easy_cleanup(curl);
+        curl_global_cleanup();
+      }
+      
       /* Use a distinctive bitmap value to tell the parent about execv()
          falling through. */
 
@@ -4366,13 +4354,13 @@ static void maybe_update_plot_file(double bitmap_cvg, double eps) {
 
      unix_time, cycles_done, cur_path, paths_total, paths_not_fuzzed,
      favored_not_fuzzed, unique_crashes, unique_hangs, max_depth,
-     execs_per_sec */
+     execs_per_sec, execs_total */
 
   fprintf(plot_file,
-          "%llu, %llu, %u, %u, %u, %u, %0.02f%%, %llu, %llu, %u, %0.02f\n",
+          "%llu, %llu, %u, %u, %u, %u, %0.02f%%, %llu, %llu, %u, %0.02f, %llu\n",
           get_cur_time() / 1000, queue_cycle - 1, current_entry, queued_paths,
           pending_not_fuzzed, pending_favored, bitmap_cvg, unique_crashes,
-          unique_hangs, max_depth, eps); /* ignore errors */
+          unique_hangs, max_depth, eps,total_execs); /* ignore errors */
 
   fflush(plot_file);
 
@@ -8237,7 +8225,7 @@ EXP_ST void setup_dirs_fds(void) {
 
   fprintf(plot_file, "# unix_time, cycles_done, cur_path, paths_total, "
                      "pending_total, pending_favs, map_size, unique_crashes, "
-                     "unique_hangs, max_depth, execs_per_sec\n");
+                     "unique_hangs, max_depth, execs_per_sec, total_execs\n");
                      /* ignore errors */
 
 }
@@ -8484,7 +8472,6 @@ static void fix_up_sync(void) {
       FATAL("use -S instead of -M -d");
     else
       FATAL("-S already implies -d");
-
   }
 
   while (*x) {
@@ -8493,35 +8480,30 @@ static void fix_up_sync(void) {
       FATAL("Non-alphanumeric fuzzer ID specified via -S or -M");
 
     x++;
-
   }
 
-  if (strlen(sync_id) > 32) FATAL("Fuzzer ID too long");
+  if (strlen(sync_id) > 32)
+    FATAL("Fuzzer ID too long");
 
   x = alloc_printf("%s/%s", out_dir, sync_id);
 
   sync_dir = out_dir;
-  out_dir  = x;
+  out_dir = x;
 
   if (!force_deterministic) {
     skip_deterministic = 1;
     use_splicing = 1;
   }
-
 }
-
 
 /* Handle screen resize (SIGWINCH). */
 
-static void handle_resize(int sig) {
-  clear_screen = 1;
-}
-
+static void handle_resize(int sig) { clear_screen = 1; }
 
 /* Check ASAN options. */
 
 static void check_asan_opts(void) {
-  u8* x = getenv("ASAN_OPTIONS");
+  u8 *x = getenv("ASAN_OPTIONS");
 
   if (x) {
 
@@ -8530,7 +8512,6 @@ static void check_asan_opts(void) {
 
     if (!strstr(x, "symbolize=0"))
       FATAL("Custom ASAN_OPTIONS set without symbolize=0 - please fix!");
-
   }
 
   x = getenv("MSAN_OPTIONS");
@@ -8538,29 +8519,27 @@ static void check_asan_opts(void) {
   if (x) {
 
     if (!strstr(x, "exit_code=" STRINGIFY(MSAN_ERROR)))
-      FATAL("Custom MSAN_OPTIONS set without exit_code="
-            STRINGIFY(MSAN_ERROR) " - please fix!");
+      FATAL("Custom MSAN_OPTIONS set without exit_code=" STRINGIFY(
+          MSAN_ERROR) " - please fix!");
 
     if (!strstr(x, "symbolize=0"))
       FATAL("Custom MSAN_OPTIONS set without symbolize=0 - please fix!");
-
   }
-
 }
-
 
 /* Detect @@ in args. */
 
-EXP_ST void detect_file_args(char** argv) {
+EXP_ST void detect_file_args(char **argv) {
 
   u32 i = 0;
-  u8* cwd = getcwd(NULL, 0);
+  u8 *cwd = getcwd(NULL, 0);
 
-  if (!cwd) PFATAL("getcwd() failed");
+  if (!cwd)
+    PFATAL("getcwd() failed");
 
   while (argv[i]) {
 
-    u8* aa_loc = strstr(argv[i], "@@");
+    u8 *aa_loc = strstr(argv[i], "@@");
 
     if (aa_loc) {
 
@@ -8573,8 +8552,10 @@ EXP_ST void detect_file_args(char** argv) {
 
       /* Be sure that we're always using fully-qualified paths. */
 
-      if (out_file[0] == '/') aa_subst = out_file;
-      else aa_subst = alloc_printf("%s/%s", cwd, out_file);
+      if (out_file[0] == '/')
+        aa_subst = out_file;
+      else
+        aa_subst = alloc_printf("%s/%s", cwd, out_file);
 
       /* Construct a replacement argv value. */
 
@@ -8583,18 +8564,15 @@ EXP_ST void detect_file_args(char** argv) {
       argv[i] = n_arg;
       *aa_loc = '@';
 
-      if (out_file[0] != '/') ck_free(aa_subst);
-
+      if (out_file[0] != '/')
+        ck_free(aa_subst);
     }
 
     i++;
-
   }
 
   free(cwd); /* not tracked */
-
 }
-
 
 /* Set up signal handlers. More complicated that needs to be, because libc on
    Solaris doesn't resume interrupted reads(), sets SA_RESETHAND when you call
@@ -8604,8 +8582,8 @@ EXP_ST void setup_signal_handlers(void) {
 
   struct sigaction sa;
 
-  sa.sa_handler   = NULL;
-  sa.sa_flags     = SA_RESTART;
+  sa.sa_handler = NULL;
+  sa.sa_flags = SA_RESTART;
   sa.sa_sigaction = NULL;
 
   sigemptyset(&sa.sa_mask);
@@ -8637,22 +8615,20 @@ EXP_ST void setup_signal_handlers(void) {
   sa.sa_handler = SIG_IGN;
   sigaction(SIGTSTP, &sa, NULL);
   sigaction(SIGPIPE, &sa, NULL);
-
 }
-
 
 /* Rewrite argv for QEMU. */
 
-static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
+static char **get_qemu_argv(u8 *own_loc, char **argv, int argc) {
 
-  char** new_argv = ck_alloc(sizeof(char*) * (argc + 4));
+  char **new_argv = ck_alloc(sizeof(char *) * (argc + 4));
   u8 *tmp, *cp, *rsl, *own_copy;
 
   /* Workaround for a QEMU stability glitch. */
 
   setenv("QEMU_LOG", "nochain", 1);
 
-  memcpy(new_argv + 3, argv + 1, sizeof(char*) * argc);
+  memcpy(new_argv + 3, argv + 1, sizeof(char *) * argc);
 
   new_argv[2] = target_path;
   new_argv[1] = "--";
@@ -8670,7 +8646,6 @@ static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
 
     target_path = new_argv[0] = cp;
     return new_argv;
-
   }
 
   own_copy = ck_strdup(own_loc);
@@ -8687,39 +8662,41 @@ static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
 
       target_path = new_argv[0] = cp;
       return new_argv;
-
     }
 
-  } else ck_free(own_copy);
+  } else
+    ck_free(own_copy);
 
   if (!access(BIN_PATH "/afl-qemu-trace", X_OK)) {
 
     target_path = new_argv[0] = ck_strdup(BIN_PATH "/afl-qemu-trace");
     return new_argv;
-
   }
 
-  SAYF("\n" cLRD "[-] " cRST
-       "Oops, unable to find the 'afl-qemu-trace' binary. The binary must be built\n"
-       "    separately by following the instructions in qemu_mode/README.qemu. If you\n"
-       "    already have the binary installed, you may need to specify AFL_PATH in the\n"
+  SAYF("\n" cLRD "[-] " cRST "Oops, unable to find the 'afl-qemu-trace' "
+                             "binary. The binary must be built\n"
+       "    separately by following the instructions in qemu_mode/README.qemu. "
+       "If you\n"
+       "    already have the binary installed, you may need to specify "
+       "AFL_PATH in the\n"
        "    environment.\n\n"
 
-       "    Of course, even without QEMU, afl-fuzz can still work with binaries that are\n"
-       "    instrumented at compile time with afl-gcc. It is also possible to use it as a\n"
-       "    traditional \"dumb\" fuzzer by specifying '-n' in the command line.\n");
+       "    Of course, even without QEMU, afl-fuzz can still work with "
+       "binaries that are\n"
+       "    instrumented at compile time with afl-gcc. It is also possible to "
+       "use it as a\n"
+       "    traditional \"dumb\" fuzzer by specifying '-n' in the command "
+       "line.\n");
 
   FATAL("Failed to locate 'afl-qemu-trace'.");
-
 }
-
 
 /* Make a copy of the current command line. */
 
-static void save_cmdline(u32 argc, char** argv) {
+static void save_cmdline(u32 argc, char **argv) {
 
   u32 len = 1, i;
-  u8* buf;
+  u8 *buf;
 
   for (i = 0; i < argc; i++)
     len += strlen(argv[i]) + 1;
@@ -8733,28 +8710,26 @@ static void save_cmdline(u32 argc, char** argv) {
     memcpy(buf, argv[i], l);
     buf += l;
 
-    if (i != argc - 1) *(buf++) = ' ';
-
+    if (i != argc - 1)
+      *(buf++) = ' ';
   }
 
   *buf = 0;
-
 }
-
 
 #ifndef AFL_LIB
 
 /* Main entry point */
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
 
   s32 opt;
   u64 prev_queued = 0;
   u32 sync_interval_cnt = 0, seek_to;
-  u8  *extras_dir = 0;
-  u8  mem_limit_given = 0;
-  u8  exit_1 = !!getenv("AFL_BENCH_JUST_ONE");
-  //char** use_argv;
+  u8 *extras_dir = 0;
+  u8 mem_limit_given = 0;
+  u8 exit_1 = !!getenv("AFL_BENCH_JUST_ONE");
+  // char** use_argv;
 
   struct timeval tv;
   struct timezone tz;
@@ -8766,326 +8741,388 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QN:D:W:w:P:KEq:s:RFc:l:")) > 0)
+  while ((opt = getopt(argc, argv,
+                       "+i:o:f:m:t:T:dnCB:S:M:x:QN:D:W:w:P:KEq:s:RFc:l:")) > 0)
 
     switch (opt) {
 
-      case 'i': /* input dir */
+    case 'i': /* input dir */
 
-        if (in_dir) FATAL("Multiple -i options not supported");
-        in_dir = optarg;
+      if (in_dir)
+        FATAL("Multiple -i options not supported");
+      in_dir = optarg;
 
-        if (!strcmp(in_dir, "-")) in_place_resume = 1;
+      if (!strcmp(in_dir, "-"))
+        in_place_resume = 1;
 
-        break;
+      break;
 
-      case 'o': /* output dir */
+    case 'o': /* output dir */
 
-        if (out_dir) FATAL("Multiple -o options not supported");
-        out_dir = optarg;
-        break;
+      if (out_dir)
+        FATAL("Multiple -o options not supported");
+      out_dir = optarg;
+      break;
 
-      case 'M': { /* master sync ID */
+    case 'M': { /* master sync ID */
 
-          u8* c;
+      u8 *c;
 
-          if (sync_id) FATAL("Multiple -S or -M options not supported");
-          sync_id = ck_strdup(optarg);
+      if (sync_id)
+        FATAL("Multiple -S or -M options not supported");
+      sync_id = ck_strdup(optarg);
 
-          if ((c = strchr(sync_id, ':'))) {
+      if ((c = strchr(sync_id, ':'))) {
 
-            *c = 0;
+        *c = 0;
 
-            if (sscanf(c + 1, "%u/%u", &master_id, &master_max) != 2 ||
-                !master_id || !master_max || master_id > master_max ||
-                master_max > 1000000) FATAL("Bogus master ID passed to -M");
-
-          }
-
-          force_deterministic = 1;
-
-        }
-
-        break;
-
-      case 'S':
-
-        if (sync_id) FATAL("Multiple -S or -M options not supported");
-        sync_id = ck_strdup(optarg);
-        break;
-
-      case 'f': /* target file */
-
-        if (out_file) FATAL("Multiple -f options not supported");
-        out_file = optarg;
-        break;
-
-      case 'x': /* dictionary */
-
-        if (extras_dir) FATAL("Multiple -x options not supported");
-        extras_dir = optarg;
-        break;
-
-      case 't': { /* timeout */
-
-          u8 suffix = 0;
-
-          if (timeout_given) FATAL("Multiple -t options not supported");
-
-          if (sscanf(optarg, "%u%c", &exec_tmout, &suffix) < 1 ||
-              optarg[0] == '-') FATAL("Bad syntax used for -t");
-
-          if (exec_tmout < 5) FATAL("Dangerously low value of -t");
-
-          if (suffix == '+') timeout_given = 2; else timeout_given = 1;
-
-          break;
-
+        if (sscanf(c + 1, "%u/%u", &master_id, &master_max) != 2 ||
+            !master_id || !master_max || master_id > master_max ||
+            master_max > 1000000)
+          FATAL("Bogus master ID passed to -M");
       }
 
-      case 'm': { /* mem limit */
-
-          u8 suffix = 'M';
-
-          if (mem_limit_given) FATAL("Multiple -m options not supported");
-          mem_limit_given = 1;
-
-          if (!strcmp(optarg, "none")) {
-
-            mem_limit = 0;
-            break;
-
-          }
-
-          if (sscanf(optarg, "%llu%c", &mem_limit, &suffix) < 1 ||
-              optarg[0] == '-') FATAL("Bad syntax used for -m");
-
-          switch (suffix) {
-
-            case 'T': mem_limit *= 1024 * 1024; break;
-            case 'G': mem_limit *= 1024; break;
-            case 'k': mem_limit /= 1024; break;
-            case 'M': break;
-
-            default:  FATAL("Unsupported suffix or bad syntax for -m");
-
-          }
-
-          if (mem_limit < 5) FATAL("Dangerously low value of -m");
-
-          if (sizeof(rlim_t) == 4 && mem_limit > 2000)
-            FATAL("Value of -m out of range on 32-bit systems");
-
-        }
-
-        break;
-
-      case 'd': /* skip deterministic */
-
-        if (skip_deterministic) FATAL("Multiple -d options not supported");
-        skip_deterministic = 1;
-        use_splicing = 1;
-        break;
-
-      case 'B': /* load bitmap */
-
-        /* This is a secret undocumented option! It is useful if you find
-           an interesting test case during a normal fuzzing process, and want
-           to mutate it without rediscovering any of the test cases already
-           found during an earlier run.
-
-           To use this mode, you need to point -B to the fuzz_bitmap produced
-           by an earlier run for the exact same binary... and that's it.
-
-           I only used this once or twice to get variants of a particular
-           file, so I'm not making this an official setting. */
-
-        if (in_bitmap) FATAL("Multiple -B options not supported");
-
-        in_bitmap = optarg;
-        read_bitmap(in_bitmap);
-        break;
-
-      case 'C': /* crash mode */
-
-        if (crash_mode) FATAL("Multiple -C options not supported");
-        crash_mode = FAULT_CRASH;
-        break;
-
-      case 'n': /* dumb mode */
-
-        if (dumb_mode) FATAL("Multiple -n options not supported");
-        if (getenv("AFL_DUMB_FORKSRV")) dumb_mode = 2; else dumb_mode = 1;
-
-        break;
-
-      case 'T': /* banner */
-
-        if (use_banner) FATAL("Multiple -T options not supported");
-        use_banner = optarg;
-        break;
-
-      case 'Q': /* QEMU mode */
-
-        if (qemu_mode) FATAL("Multiple -Q options not supported");
-        qemu_mode = 1;
-
-        if (!mem_limit_given) mem_limit = MEM_LIMIT_QEMU;
-
-        break;
-
-      case 'N': /* Network configuration */
-        if (use_net) FATAL("Multiple -N options not supported");
-        if (parse_net_config(optarg, &net_protocol, &net_ip, &net_port)) FATAL("Bad syntax used for -N. Check the network setting. [tcp/udp]://127.0.0.1/port");
-
-        use_net = 1;
-        break;
-
-      case 'D': /* waiting time for the server initialization */
-        if (server_wait) FATAL("Multiple -D options not supported");
-
-        if (sscanf(optarg, "%u", &server_wait_usecs) < 1 || optarg[0] == '-') FATAL("Bad syntax used for -D");
-        server_wait = 1;
-        break;
-
-      case 'W': /* polling timeout determining maximum amount of time waited before concluding that no responses are forthcoming*/
-        if (socket_timeout) FATAL("Multiple -W options not supported");
-
-        if (sscanf(optarg, "%u", &poll_wait_msecs) < 1 || optarg[0] == '-') FATAL("Bad syntax used for -W");
-        poll_wait = 1;
-        break;
-
-      case 'w': /* receive/send socket timeout determining time waited for each response */
-        if (socket_timeout) FATAL("Multiple -w options not supported");
-
-        if (sscanf(optarg, "%u", &socket_timeout_usecs) < 1 || optarg[0] == '-') FATAL("Bad syntax used for -w");
-        socket_timeout = 1;
-        break;
-
-      case 'P': /* protocol to be tested */
-        if (protocol_selected) FATAL("Multiple -P options not supported");
-
-        if (!strcmp(optarg, "RTSP")) {
-          extract_requests = &extract_requests_rtsp;
-          extract_response_codes = &extract_response_codes_rtsp;
-        } else if (!strcmp(optarg, "FTP")) {
-          extract_requests = &extract_requests_ftp;
-          extract_response_codes = &extract_response_codes_ftp;
-        } else if (!strcmp(optarg, "DTLS12")) {
-          extract_requests = &extract_requests_dtls12;
-          extract_response_codes = &extract_response_codes_dtls12;
-        } else if (!strcmp(optarg, "DNS")) {
-          extract_requests = &extract_requests_dns;
-          extract_response_codes = &extract_response_codes_dns;
-        } else if (!strcmp(optarg, "DICOM")) {
-          extract_requests = &extract_requests_dicom;
-          extract_response_codes = &extract_response_codes_dicom;
-        } else if (!strcmp(optarg, "SMTP")) {
-          extract_requests = &extract_requests_smtp;
-          extract_response_codes = &extract_response_codes_smtp;
-        } else if (!strcmp(optarg, "SSH")) {
-          extract_requests = &extract_requests_ssh;
-          extract_response_codes = &extract_response_codes_ssh;
-        } else if (!strcmp(optarg, "TLS")) {
-          extract_requests = &extract_requests_tls;
-          extract_response_codes = &extract_response_codes_tls;
-        } else if (!strcmp(optarg, "SIP")) {
-          extract_requests = &extract_requests_sip;
-          extract_response_codes = &extract_response_codes_sip;
-        } else if (!strcmp(optarg, "HTTP")) {
-          extract_requests = &extract_requests_http;
-          extract_response_codes = &extract_response_codes_http;
-        } else if (!strcmp(optarg, "IPP")) {
-          extract_requests = &extract_requests_ipp;
-          extract_response_codes = &extract_response_codes_ipp;
-        } else {
-          FATAL("%s protocol is not supported yet!", optarg);
-        }
-
-        protocol_selected = 1;
-
-        break;
-
-      case 'K':
-        if (terminate_child) FATAL("Multiple -K options not supported");
-        terminate_child = 1;
-        break;
-
-      case 'E':
-        if (state_aware_mode) FATAL("Multiple -E options not supported");
-        state_aware_mode = 1;
-        break;
-
-      case 'q': /* state selection option */
-        if (sscanf(optarg, "%hhu", &state_selection_algo) < 1 || optarg[0] == '-') FATAL("Bad syntax used for -q");
-        break;
-
-      case 's': /* seed selection option */
-        if (sscanf(optarg, "%hhu", &seed_selection_algo) < 1 || optarg[0] == '-') FATAL("Bad syntax used for -s");
-        break;
-
-      case 'R':
-        if (region_level_mutation) FATAL("Multiple -R options not supported");
-        region_level_mutation = 1;
-        break;
-
-      case 'F':
-        if (false_negative_reduction) FATAL("Multiple -F options not supported");
-        false_negative_reduction = 1;
-        break;
-
-      case 'c': /* cleanup script */
-
-        if (cleanup_script) FATAL("Multiple -c options not supported");
-        cleanup_script = optarg;
-        break;
-
-      case 'l': /* local port to connect from */
-        //This option is only used for targets that send responses to a specific port number
-        //The Kamailio SIP server is an example
-
-        if (local_port) FATAL("Multiple -l options not supported");
-        local_port = atoi(optarg);
-	      if (local_port < 1024 || local_port > 65535) FATAL("Invalid source port number");
-        break;
-
-      default:
-
-        usage(argv[0]);
+      force_deterministic = 1;
 
     }
 
-  if (optind == argc || !in_dir || !out_dir) usage(argv[0]);
+    break;
 
-  //AFLNet - Check for required arguments
-  if (!use_net) FATAL("Please specify network information of the server under test (e.g., tcp://127.0.0.1/8554)");
+    case 'S':
 
-  if (!protocol_selected) FATAL("Please specify the protocol to be tested using the -P option");
+      if (sync_id)
+        FATAL("Multiple -S or -M options not supported");
+      sync_id = ck_strdup(optarg);
+      break;
+
+    case 'f': /* target file */
+
+      if (out_file)
+        FATAL("Multiple -f options not supported");
+      out_file = optarg;
+      break;
+
+    case 'x': /* dictionary */
+
+      if (extras_dir)
+        FATAL("Multiple -x options not supported");
+      extras_dir = optarg;
+      break;
+
+    case 't': { /* timeout */
+
+      u8 suffix = 0;
+
+      if (timeout_given)
+        FATAL("Multiple -t options not supported");
+
+      if (sscanf(optarg, "%u%c", &exec_tmout, &suffix) < 1 || optarg[0] == '-')
+        FATAL("Bad syntax used for -t");
+
+      if (exec_tmout < 5)
+        FATAL("Dangerously low value of -t");
+
+      if (suffix == '+')
+        timeout_given = 2;
+      else
+        timeout_given = 1;
+
+      break;
+    }
+
+    case 'm': { /* mem limit */
+
+      u8 suffix = 'M';
+
+      if (mem_limit_given)
+        FATAL("Multiple -m options not supported");
+      mem_limit_given = 1;
+
+      if (!strcmp(optarg, "none")) {
+
+        mem_limit = 0;
+        break;
+      }
+
+      if (sscanf(optarg, "%llu%c", &mem_limit, &suffix) < 1 || optarg[0] == '-')
+        FATAL("Bad syntax used for -m");
+
+      switch (suffix) {
+
+      case 'T':
+        mem_limit *= 1024 * 1024;
+        break;
+      case 'G':
+        mem_limit *= 1024;
+        break;
+      case 'k':
+        mem_limit /= 1024;
+        break;
+      case 'M':
+        break;
+
+      default:
+        FATAL("Unsupported suffix or bad syntax for -m");
+      }
+
+      if (mem_limit < 5)
+        FATAL("Dangerously low value of -m");
+
+      if (sizeof(rlim_t) == 4 && mem_limit > 2000)
+        FATAL("Value of -m out of range on 32-bit systems");
+
+    }
+
+    break;
+
+    case 'd': /* skip deterministic */
+
+      if (skip_deterministic)
+        FATAL("Multiple -d options not supported");
+      skip_deterministic = 1;
+      use_splicing = 1;
+      break;
+
+    case 'B': /* load bitmap */
+
+      /* This is a secret undocumented option! It is useful if you find
+         an interesting test case during a normal fuzzing process, and want
+         to mutate it without rediscovering any of the test cases already
+         found during an earlier run.
+
+         To use this mode, you need to point -B to the fuzz_bitmap produced
+         by an earlier run for the exact same binary... and that's it.
+
+         I only used this once or twice to get variants of a particular
+         file, so I'm not making this an official setting. */
+
+      if (in_bitmap)
+        FATAL("Multiple -B options not supported");
+
+      in_bitmap = optarg;
+      read_bitmap(in_bitmap);
+      break;
+
+    case 'C': /* crash mode */
+
+      if (crash_mode)
+        FATAL("Multiple -C options not supported");
+      crash_mode = FAULT_CRASH;
+      break;
+
+    case 'n': /* dumb mode */
+
+      if (dumb_mode)
+        FATAL("Multiple -n options not supported");
+      if (getenv("AFL_DUMB_FORKSRV"))
+        dumb_mode = 2;
+      else
+        dumb_mode = 1;
+
+      break;
+
+    case 'T': /* banner */
+
+      if (use_banner)
+        FATAL("Multiple -T options not supported");
+      use_banner = optarg;
+      break;
+
+    case 'Q': /* QEMU mode */
+
+      if (qemu_mode)
+        FATAL("Multiple -Q options not supported");
+      qemu_mode = 1;
+
+      if (!mem_limit_given)
+        mem_limit = MEM_LIMIT_QEMU;
+
+      break;
+
+    case 'N': /* Network configuration */
+      if (use_net)
+        FATAL("Multiple -N options not supported");
+      if (parse_net_config(optarg, &net_protocol, &net_ip, &net_port))
+        FATAL("Bad syntax used for -N. Check the network setting. "
+              "[tcp/udp]://127.0.0.1/port");
+
+      use_net = 1;
+      break;
+
+    case 'D': /* waiting time for the server initialization */
+      if (server_wait)
+        FATAL("Multiple -D options not supported");
+
+      if (sscanf(optarg, "%u", &server_wait_usecs) < 1 || optarg[0] == '-')
+        FATAL("Bad syntax used for -D");
+      server_wait = 1;
+      break;
+
+    case 'W': /* polling timeout determining maximum amount of time waited
+                 before concluding that no responses are forthcoming*/
+      if (socket_timeout)
+        FATAL("Multiple -W options not supported");
+
+      if (sscanf(optarg, "%u", &poll_wait_msecs) < 1 || optarg[0] == '-')
+        FATAL("Bad syntax used for -W");
+      poll_wait = 1;
+      break;
+
+    case 'w': /* receive/send socket timeout determining time waited for each
+                 response */
+      if (socket_timeout)
+        FATAL("Multiple -w options not supported");
+
+      if (sscanf(optarg, "%u", &socket_timeout_usecs) < 1 || optarg[0] == '-')
+        FATAL("Bad syntax used for -w");
+      socket_timeout = 1;
+      break;
+
+    case 'P': /* protocol to be tested */
+      if (protocol_selected)
+        FATAL("Multiple -P options not supported");
+
+      if (!strcmp(optarg, "RTSP")) {
+        extract_requests = &extract_requests_rtsp;
+        extract_response_codes = &extract_response_codes_rtsp;
+      } else if (!strcmp(optarg, "FTP")) {
+        extract_requests = &extract_requests_ftp;
+        extract_response_codes = &extract_response_codes_ftp;
+      } else if (!strcmp(optarg, "DTLS12")) {
+        extract_requests = &extract_requests_dtls12;
+        extract_response_codes = &extract_response_codes_dtls12;
+      } else if (!strcmp(optarg, "DNS")) {
+        extract_requests = &extract_requests_dns;
+        extract_response_codes = &extract_response_codes_dns;
+      } else if (!strcmp(optarg, "DICOM")) {
+        extract_requests = &extract_requests_dicom;
+        extract_response_codes = &extract_response_codes_dicom;
+      } else if (!strcmp(optarg, "SMTP")) {
+        extract_requests = &extract_requests_smtp;
+        extract_response_codes = &extract_response_codes_smtp;
+      } else if (!strcmp(optarg, "SSH")) {
+        extract_requests = &extract_requests_ssh;
+        extract_response_codes = &extract_response_codes_ssh;
+      } else if (!strcmp(optarg, "TLS")) {
+        extract_requests = &extract_requests_tls;
+        extract_response_codes = &extract_response_codes_tls;
+      } else if (!strcmp(optarg, "SIP")) {
+        extract_requests = &extract_requests_sip;
+        extract_response_codes = &extract_response_codes_sip;
+      } else if (!strcmp(optarg, "HTTP")) {
+        extract_requests = &extract_requests_http;
+        extract_response_codes = &extract_response_codes_http;
+      } else if (!strcmp(optarg, "IRC")) {
+        extract_requests = &extract_requests_irc;
+        extract_response_codes = &extract_response_codes_irc;
+      } else {
+        FATAL("%s protocol is not supported yet!", optarg);
+      }
+
+      protocol_selected = 1;
+
+      break;
+
+    case 'K':
+      if (terminate_child)
+        FATAL("Multiple -K options not supported");
+      terminate_child = 1;
+      break;
+
+    case 'E':
+      if (state_aware_mode)
+        FATAL("Multiple -E options not supported");
+      state_aware_mode = 1;
+      break;
+
+    case 'q': /* state selection option */
+      if (sscanf(optarg, "%hhu", &state_selection_algo) < 1 || optarg[0] == '-')
+        FATAL("Bad syntax used for -q");
+      break;
+
+    case 's': /* seed selection option */
+      if (sscanf(optarg, "%hhu", &seed_selection_algo) < 1 || optarg[0] == '-')
+        FATAL("Bad syntax used for -s");
+      break;
+
+    case 'R':
+      if (region_level_mutation)
+        FATAL("Multiple -R options not supported");
+      region_level_mutation = 1;
+      break;
+
+    case 'F':
+      if (false_negative_reduction)
+        FATAL("Multiple -F options not supported");
+      false_negative_reduction = 1;
+      break;
+
+    case 'c': /* cleanup script */
+
+      if (cleanup_script)
+        FATAL("Multiple -c options not supported");
+      cleanup_script = optarg;
+      break;
+
+    case 'l': /* local port to connect from */
+      // This option is only used for targets that send responses to a specific
+      // port number The Kamailio SIP server is an example
+
+      if (local_port)
+        FATAL("Multiple -l options not supported");
+      local_port = atoi(optarg);
+      if (local_port < 1024 || local_port > 65535)
+        FATAL("Invalid source port number");
+      break;
+
+    default:
+
+      usage(argv[0]);
+    }
+
+  if (optind == argc || !in_dir || !out_dir)
+    usage(argv[0]);
+
+  // AFLNet - Check for required arguments
+  if (!use_net)
+    FATAL("Please specify network information of the server under test (e.g., "
+          "tcp://127.0.0.1/8554)");
+
+  if (!protocol_selected)
+    FATAL("Please specify the protocol to be tested using the -P option");
 
   setup_signal_handlers();
   check_asan_opts();
 
-  if (sync_id) fix_up_sync();
+  if (sync_id)
+    fix_up_sync();
 
   if (!strcmp(in_dir, out_dir))
     FATAL("Input and output directories can't be the same");
 
   if (dumb_mode) {
 
-    if (crash_mode) FATAL("-C and -n are mutually exclusive");
-    if (qemu_mode)  FATAL("-Q and -n are mutually exclusive");
-
+    if (crash_mode)
+      FATAL("-C and -n are mutually exclusive");
+    if (qemu_mode)
+      FATAL("-Q and -n are mutually exclusive");
   }
 
-  if (getenv("AFL_NO_FORKSRV"))    no_forkserver    = 1;
-  if (getenv("AFL_NO_CPU_RED"))    no_cpu_meter_red = 1;
-  if (getenv("AFL_NO_ARITH"))      no_arith         = 1;
-  if (getenv("AFL_SHUFFLE_QUEUE")) shuffle_queue    = 1;
-  if (getenv("AFL_FAST_CAL"))      fast_cal         = 1;
+  if (getenv("AFL_NO_FORKSRV"))
+    no_forkserver = 1;
+  if (getenv("AFL_NO_CPU_RED"))
+    no_cpu_meter_red = 1;
+  if (getenv("AFL_NO_ARITH"))
+    no_arith = 1;
+  if (getenv("AFL_SHUFFLE_QUEUE"))
+    shuffle_queue = 1;
+  if (getenv("AFL_FAST_CAL"))
+    fast_cal = 1;
 
   if (getenv("AFL_HANG_TMOUT")) {
     hang_tmout = atoi(getenv("AFL_HANG_TMOUT"));
-    if (!hang_tmout) FATAL("Invalid value of AFL_HANG_TMOUT");
+    if (!hang_tmout)
+      FATAL("Invalid value of AFL_HANG_TMOUT");
   }
 
   if (dumb_mode == 2 && no_forkserver)
@@ -9126,13 +9163,16 @@ int main(int argc, char** argv) {
 
   pivot_inputs();
 
-  if (extras_dir) load_extras(extras_dir);
+  if (extras_dir)
+    load_extras(extras_dir);
 
-  if (!timeout_given) find_timeout();
+  if (!timeout_given)
+    find_timeout();
 
   detect_file_args(argv + optind + 1);
 
-  if (!out_file) setup_stdio_file();
+  if (!out_file)
+    setup_stdio_file();
 
   check_binary(argv[optind]);
 
@@ -9154,33 +9194,37 @@ int main(int argc, char** argv) {
   write_stats_file(0, 0, 0);
   save_auto();
 
-  if (stop_soon) goto stop_fuzzing;
+  if (stop_soon)
+    goto stop_fuzzing;
 
   /* Woop woop woop */
 
   if (!not_on_tty) {
     sleep(4);
     start_time += 4000;
-    if (stop_soon) goto stop_fuzzing;
+    if (stop_soon)
+      goto stop_fuzzing;
   }
 
   if (state_aware_mode) {
 
     if (state_ids_count == 0) {
-      PFATAL("No server states have been detected. Server responses are likely empty!");
+      PFATAL("No server states have been detected. Server responses are likely "
+             "empty!");
     }
 
     while (1) {
       u8 skipped_fuzz;
 
       struct queue_entry *selected_seed = NULL;
-      while(!selected_seed || selected_seed->region_count == 0) {
+      while (!selected_seed || selected_seed->region_count == 0) {
         target_state_id = choose_target_state(state_selection_algo);
 
         /* Update favorites based on the selected state */
         cull_queue();
 
-        /* Update number of times a state has been selected for targeted fuzzing */
+        /* Update number of times a state has been selected for targeted fuzzing
+         */
         khint_t k = kh_get(hms, khms_states, target_state_id);
         if (k != kh_end(khms_states)) {
           kh_val(khms_states, k)->selected_times++;
@@ -9188,22 +9232,23 @@ int main(int argc, char** argv) {
 
         selected_seed = choose_seed(target_state_id, seed_selection_algo);
       }
-
+      printf("Seeking..\n");
       /* Seek to the selected seed */
       if (selected_seed) {
+        // INJECT PODMAN API HERE
         if (!queue_cur) {
-            current_entry     = 0;
-            cur_skipped_paths = 0;
-            queue_cur         = queue;
-            queue_cycle++;
+          current_entry = 0;
+          cur_skipped_paths = 0;
+          queue_cur = queue;
+          queue_cycle++;
         }
         while (queue_cur != selected_seed) {
           queue_cur = queue_cur->next;
           current_entry++;
           if (!queue_cur) {
-            current_entry     = 0;
+            current_entry = 0;
             cur_skipped_paths = 0;
-            queue_cur         = queue;
+            queue_cur = queue;
             queue_cycle++;
           }
         }
@@ -9215,15 +9260,16 @@ int main(int argc, char** argv) {
 
         if (!(sync_interval_cnt++ % SYNC_INTERVAL))
           sync_fuzzers(use_argv);
-
       }
 
-      if (!stop_soon && exit_1) stop_soon = 2;
+      if (!stop_soon && exit_1)
+        stop_soon = 2;
 
-      if (stop_soon) break;
+      if (stop_soon)
+        break;
     }
 
-  } else {
+  } else { // END IF state_aware_mode
     while (1) {
 
       u8 skipped_fuzz;
@@ -9233,9 +9279,9 @@ int main(int argc, char** argv) {
       if (!queue_cur) {
 
         queue_cycle++;
-        current_entry     = 0;
+        current_entry = 0;
         cur_skipped_paths = 0;
-        queue_cur         = queue;
+        queue_cur = queue;
 
         while (seek_to) {
           current_entry++;
@@ -9255,15 +9301,18 @@ int main(int argc, char** argv) {
 
         if (queued_paths == prev_queued) {
 
-          if (use_splicing) cycles_wo_finds++; else use_splicing = 1;
+          if (use_splicing)
+            cycles_wo_finds++;
+          else
+            use_splicing = 1;
 
-        } else cycles_wo_finds = 0;
+        } else
+          cycles_wo_finds = 0;
 
         prev_queued = queued_paths;
 
         if (sync_id && queue_cycle == 1 && getenv("AFL_IMPORT_FIRST"))
           sync_fuzzers(use_argv);
-
       }
 
       skipped_fuzz = fuzz_one(use_argv);
@@ -9272,28 +9321,32 @@ int main(int argc, char** argv) {
 
         if (!(sync_interval_cnt++ % SYNC_INTERVAL))
           sync_fuzzers(use_argv);
-
       }
 
-      if (!stop_soon && exit_1) stop_soon = 2;
+      if (!stop_soon && exit_1)
+        stop_soon = 2;
 
-      if (stop_soon) break;
+      if (stop_soon)
+        break;
 
       queue_cur = queue_cur->next;
       current_entry++;
-
     }
   }
 
-  if (queue_cur) show_stats();
+  if (queue_cur)
+    show_stats();
 
-  /* If we stopped programmatically, we kill the forkserver and the current runner.
-     If we stopped manually, this is done by the signal handler. */
+  /* If we stopped programmatically, we kill the forkserver and the current
+     runner. If we stopped manually, this is done by the signal handler. */
   if (stop_soon == 2) {
-      if (child_pid > 0) kill(child_pid, SIGKILL);
-      if (forksrv_pid > 0) kill(forksrv_pid, SIGKILL);
+    if (child_pid > 0)
+      kill(child_pid, SIGKILL);
+    if (forksrv_pid > 0)
+      kill(forksrv_pid, SIGKILL);
   }
-  /* Now that we've killed the forkserver, we wait for it to be able to get rusage stats. */
+  /* Now that we've killed the forkserver, we wait for it to be able to get
+   * rusage stats. */
   if (waitpid(forksrv_pid, NULL, 0) <= 0) {
     WARNF("error waitpid\n");
   }
@@ -9312,9 +9365,9 @@ stop_fuzzing:
   if (queue_cycle == 1 && get_cur_time() - start_time > 30 * 60 * 1000) {
 
     SAYF("\n" cYEL "[!] " cRST
-           "Stopped during the first cycle, results may be incomplete.\n"
-           "    (For info on resuming, see %s/README.)\n", doc_path);
-
+         "Stopped during the first cycle, results may be incomplete.\n"
+         "    (For info on resuming, see %s/README.)\n",
+         doc_path);
   }
 
   fclose(plot_file);
@@ -9330,7 +9383,6 @@ stop_fuzzing:
   OKF("We're done here. Have a nice day!\n");
 
   exit(0);
-
 }
 
 #endif /* !AFL_LIB */
