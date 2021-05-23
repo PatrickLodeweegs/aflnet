@@ -95,7 +95,7 @@
 
 /* Lots of globals, but mostly for the status UI and other things where it
    really makes no sense to haul them around as function parameters. */
-
+    
 
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *out_file,                  /* File to fuzz, if any             */
@@ -3141,12 +3141,27 @@ static u8 run_target(char** argv, u32 timeout) {
   memset(trace_bits, 0, MAP_SIZE);
   MEM_BARRIER();
 
- 
+  if(1){
+    CURL *curl;
+    CURLcode res;
+    curl_global_init(CURL_GLOBAL_ALL);
+    curl = curl_easy_init();
+    if(curl){
+      curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:8080/v/1.40.0/libpod/containers/sut/restore");
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "import=0&keep=1");
+      res = curl_easy_perform(curl);
+        if(res != CURLE_OK){
+          fprintf(stderr, "curl easy_perform() failes: %s\n", curl_easy_strerror(res));
+        }
+      curl_easy_cleanup(curl);
+      curl_global_cleanup();
+      }
+  }  
   /* If we're running in "dumb" mode, we can't rely on the fork server
      logic compiled into the target program, so we will just keep calling
      execve(). There is a bit of code duplication between here and
      init_forkserver(), but c'est la vie. */
-   if (dumb_mode == 1 || no_forkserver) {
+   else if (dumb_mode == 1 || no_forkserver) {
     child_pid = fork();
     if (child_pid < 0) PFATAL("fork() failed");
     if (!child_pid) {
@@ -3186,20 +3201,7 @@ static u8 run_target(char** argv, u32 timeout) {
                              "symbolize=0:"
                              "msan_track_origins=0", 0);
       /* execv(target_path, argv); */
-      CURL *curl;
-      CURLcode res;
-      curl_global_init(CURL_GLOBAL_ALL);
-      curl = curl_easy_init();
-      if(curl){
-        curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:8080/v/1.40.0/libpod/containers/sut/restore");
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "import=0&keep=1");
-        res = curl_easy_perform(curl)
-        if(res != CURLE_OK){
-          fprintf(stderr, "curl easy_perform() failes: %s\n", curl_easy_strerror(res));
-        }
-        curl_easy_cleanup(curl);
-        curl_global_cleanup();
-      }
+     
       
       /* Use a distinctive bitmap value to tell the parent about execv()
          falling through. */
